@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#2f6fde">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<title>음성 일기</title>
+<style>
+  :root { --bg:#f6f5f2; --card:#fff; --ink:#1f1f1f; --sub:#6b6b6b; --line:#dcd9d2; --accent:#2f6fde; --rec:#d93025; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#17181a; --card:#222427; --ink:#ececec; --sub:#9a9a9a; --line:#3a3d42; --accent:#6ea0ff; --rec:#ff6b5e; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.6 "Malgun Gothic","Apple SD Gothic Neo","Noto Sans KR",sans-serif; }
+  main { max-width:720px; margin:0 auto; padding:16px 16px 40px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:10px; }
+  button, input[type=date], select { font:inherit; color:var(--ink); background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px 12px; }
+  button { cursor:pointer; }
+  #mic { width:100%; font-size:20px; font-weight:700; padding:18px; background:var(--accent); border-color:var(--accent); color:#fff; }
+  #mic.on { background:var(--rec); border-color:var(--rec); }
+  #copy { flex:1; background:var(--accent); border-color:var(--accent); color:#fff; font-weight:700; }
+  #para, #undo { flex:1; }
+  #header { font-weight:700; font-size:17px; margin:6px 0; }
+  textarea { width:100%; min-height:260px; resize:vertical; font:inherit; color:var(--ink); background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; }
+  #status { min-height:1.6em; color:var(--sub); font-size:14px; margin:6px 2px; }
+  progress { width:100%; height:8px; display:none; }
+  details { margin-top:14px; color:var(--sub); font-size:14px; }
+  details li { margin:2px 0; }
+</style>
+</head>
+<body>
+<main>
+  <div class="row">
+    <input type="date" id="date">
+    <button id="today">오늘</button>
+  </div>
+
+  <button id="mic">🎤 말하기</button>
+  <div id="status"></div>
+  <progress id="prog" max="100" value="0"></progress>
+
+  <div id="header"></div>
+  <textarea id="body" placeholder="말하기를 누르고 한 가지를 말한 뒤 다시 누르면 여기에 한 줄로 쌓여요. 직접 고쳐 써도 돼요."></textarea>
+
+  <div class="row" style="margin-top:10px">
+    <button id="para">문단 나누기</button>
+    <button id="undo">마지막 줄 지우기</button>
+  </div>
+  <div class="row">
+    <button id="copy">전체 복사</button>
+  </div>
+
+  <details>
+    <summary>사용법과 설정</summary>
+    <ul>
+      <li>음성은 이 기기 안에서만 글자로 바뀌어요. 인터넷으로 나가지 않아요.</li>
+      <li>처음 한 번만 인식 모델을 내려받고, 그 뒤로는 인터넷 없이도 돼요.</li>
+      <li>"11시 반부터 오후 1시까지 점심"처럼 시간으로 시작하면 "11:30~13:00 점심"으로 바뀌어요.</li>
+      <li>"문단 바꿔"라고만 말하면 다음 줄 앞에 한 줄을 띄워요. "방금 거 지워"는 마지막 줄을 지워요.</li>
+      <li>내용은 날짜별로 이 기기에 자동 저장돼요.</li>
+    </ul>
+    <div class="row">
+      <label for="model">인식 모델</label>
+      <select id="model">
+        <option value="onnx-community/whisper-small">정확 (약 250MB)</option>
+        <option value="onnx-community/whisper-base">빠름 (약 80MB)</option>
+      </select>
+    </div>
+  </details>
+</main>
+
+<script>
+// <pure>
+const DOW = ['일','월','화','수','목','금','토'];
+
+function headerFor(iso) {               // "2026-11-14" -> "2026.11.14 (토)"
+  const [y, m, d] = iso.split('-').map(Number);
+  const dow = DOW[new Date(y, m - 1, d).getDay()];
+  return `${y}.${String(m).padStart(2,'0')}.${String(d).padStart(2,'0')} (${dow})`;
+}
+
+const NATIVE = { 한:1, 두:2, 세:3, 네:4, 다섯:5, 여섯:6, 일곱:7, 여덟:8, 아홉:9, 열:10, 열한:11, 열두:12 };
+const NATIVE_RE = /(^|\s)(열두|열한|열|아홉|여덟|일곱|여섯|다섯|네|세|두|한)\s*시(?!간)/g;
+
+const T = '(?:(오전|오후|아침|저녁|밤|새벽|낮)\\s*)?(\\d{1,2})\\s*시(?!간)\\s*(?:(반)|(\\d{1,2})\\s*분)?';
+const RANGE_RE  = new RegExp('^' + T + '\\s*(?:부터|에서|~|-)\\s*' + T + '\\s*(?:까지)?[\\s,]*');
+const SINGLE_RE = new RegExp('^' + T + '\\s*(?:에|쯤|경)?(?:[\\s,]+|$)');
+
+function toMinutes(mer, h, half, m) {
+  h = Number(h);
+  const mm = half ? 30 : (m ? Number(m) : 0);
+  if (mer === '오후' || mer === '저녁' || mer === '낮') { if (h < 12) h += 12; }
+  else if (mer === '밤') { if (h === 12) h = 0; else if (h >= 5 && h < 12) h += 12; }
+  else if (mer === '오전' || mer === '아침' || mer === '새벽') { if (h === 12) h = 0; }
+  else if (h >= 1 && h <= 6) h += 12;   // 표시가 없으면 1~6시는 오후로 봄
+  return h * 60 + mm;
+}
+const fmt = t => `${Math.floor(t / 60) % 24}:${String(t % 60).padStart(2, '0')}`;
+
+function normalizeLine(text) {
+  let s = text.trim().replace(/\s+/g, ' ').replace(/[.。]+$/, '');
+  s = s.replace(NATIVE_RE, (_, pre, w) => `${pre}${NATIVE[w]}시`);   // "열한 시" -> "11시"
+  let m = s.match(RANGE_RE);
+  if (m) {
+    const a = toMinutes(m[1], m[2], m[3], m[4]);
+    let b = toMinutes(m[5], m[6], m[7], m[8]);
+    if (b < a && b < 720) b += 720;     // 끝이 시작보다 이르면 오후로 넘김
+    return `${fmt(a)}~${fmt(b)} ${s.slice(m[0].length)}`.trim();
+  }
+  m = s.match(SINGLE_RE);
+  if (m) return `${fmt(toMinutes(m[1], m[2], m[3], m[4]))} ${s.slice(m[0].length)}`.trim();
+  return s;
+}
+
+function commandOf(text) {              // 음성 명령이면 종류를, 아니면 null
+  const k = text.replace(/[\s.,!?]/g, '');
+  if (/^(문단바꿔|문단나눠|문단나누기|한줄띄워|줄띄워|다음문단)(줘)?$/.test(k)) return 'para';
+  if (/^(방금거지워|방금꺼지워|마지막줄지워|지워|취소)(줘)?$/.test(k)) return 'undo';
+  return null;
+}
+
+function appendLine(body, line, breakBefore) {
+  if (!body.trim()) return line;
+  return body.replace(/\s+$/, '') + (breakBefore ? '\n\n' : '\n') + line;
+}
+
+function removeLastLine(body) {
+  const lines = body.replace(/\s+$/, '').split('\n');
+  lines.pop();
+  return lines.join('\n').replace(/\s+$/, '');
+}
+
+function rms(samples) {                 // 소리 크기(제곱평균제곱근)
+  let sum = 0;
+  for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
+  return Math.sqrt(sum / Math.max(1, samples.length));
+}
+// </pure>
+
+const $ = id => document.getElementById(id);
+const bodyEl = $('body'), dateEl = $('date'), micEl = $('mic'), statusEl = $('status'), progEl = $('prog'), modelEl = $('model');
+const store = {
+  get(k) { try { return localStorage.getItem(k) || ''; } catch { return ''; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+};
+const say = msg => { statusEl.textContent = msg; };
+const todayIso = () => {
+  const n = new Date();
+  return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
+};
+const key = () => 'diary:' + dateEl.value;
+let pendingBreak = false;
+
+function load() { $('header').textContent = headerFor(dateEl.value); bodyEl.value = store.get(key()); pendingBreak = false; }
+function save() { store.set(key(), bodyEl.value); }
+
+function handleText(text) {
+  if (!text.trim()) { say('알아들은 말이 없어요.'); return; }
+  const cmd = commandOf(text);
+  if (cmd === 'para') { pendingBreak = true; say('다음 줄 앞에 한 줄 띄울게요.'); return; }
+  if (cmd === 'undo') { bodyEl.value = removeLastLine(bodyEl.value); save(); say('마지막 줄을 지웠어요.'); return; }
+  bodyEl.value = appendLine(bodyEl.value, normalizeLine(text), pendingBreak);
+  pendingBreak = false;
+  save();
+  bodyEl.scrollTop = bodyEl.scrollHeight;
+}
+
+// ---- 인식 모델 (워커에서 기기 안 실행) ----
+let worker = null, modelState = 'none', pending = 0, nextId = 1;   // none | loading | ready
+const waiters = new Map();
+
+function ensureWorker() {
+  if (worker) return;
+  worker = new Worker('worker.js', { type: 'module' });
+  worker.onmessage = ({ data }) => {
+    if (data.type === 'progress') { progEl.style.display = 'block'; progEl.value = data.percent; say(`인식 모델 내려받는 중 ${data.percent}%`); }
+    else if (data.type === 'ready') { modelState = 'ready'; progEl.style.display = 'none'; store.set('modelReady:' + modelEl.value, '1'); say('준비됐어요.'); }
+    else if (data.type === 'loadError') { modelState = 'none'; progEl.style.display = 'none'; say('모델을 불러오지 못했어요: ' + data.message); }
+    else if (data.type === 'result' || data.type === 'runError') {
+      const w = waiters.get(data.id); waiters.delete(data.id);
+      if (w) data.type === 'result' ? w.resolve(data.text) : w.reject(new Error(data.message));
+    }
+  };
+  worker.onerror = e => { modelState = 'none'; say('인식 엔진 오류: ' + (e.message || '알 수 없음')); };
+}
+
+function loadModel() {
+  ensureWorker();
+  modelState = 'loading';
+  say('인식 모델 준비 중…');
+  worker.postMessage({ type: 'load', model: modelEl.value });
+}
+
+function transcribe(samples) {
+  const id = nextId++;
+  return new Promise((resolve, reject) => {
+    waiters.set(id, { resolve, reject });
+    worker.postMessage({ type: 'run', id, audio: samples }, [samples.buffer]);
+  });
+}
+
+async function transcribeBlob(blob) {
+  const ctx = new AudioContext({ sampleRate: 16000 });       // Whisper 입력은 16kHz 모노
+  let samples;
+  try { samples = (await ctx.decodeAudioData(await blob.arrayBuffer())).getChannelData(0).slice(); }
+  finally { ctx.close(); }
+  if (samples.length < 16000 * 0.4 || rms(samples) < 0.003) { say('소리가 너무 짧거나 작아요.'); return; }
+  pending++; say(`글자로 바꾸는 중… (${pending}개)`);
+  try { const text = await transcribe(samples); pending--; say(pending ? `글자로 바꾸는 중… (${pending}개)` : ''); handleText(text); }
+  catch (e) { pending--; say('인식 실패: ' + e.message); }
+}
+window.transcribeBlob = transcribeBlob;
+
+// ---- 녹음 ----
+let recorder = null, chunks = [];
+
+async function startRecording() {
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, noiseSuppression: true, echoCancellation: true } }); }
+  catch { say('마이크 권한이 필요해요.'); return; }
+  chunks = [];
+  recorder = new MediaRecorder(stream);
+  recorder.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+  recorder.onstop = () => {
+    stream.getTracks().forEach(t => t.stop());                 // 마이크 바로 해제
+    micEl.classList.remove('on'); micEl.textContent = '🎤 말하기';
+    const blob = new Blob(chunks, { type: recorder.mimeType });
+    recorder = null;
+    transcribeBlob(blob);
+  };
+  recorder.start();
+  micEl.classList.add('on'); micEl.textContent = '■ 다 말했어요';
+  say('듣는 중…');
+}
+
+micEl.onclick = () => {
+  if (recorder) { recorder.stop(); return; }
+  if (modelState === 'loading') { say('인식 모델 준비 중이에요. 잠시만요.'); return; }
+  if (modelState === 'none') {
+    const size = modelEl.selectedOptions[0].textContent;
+    if (store.get('modelReady:' + modelEl.value) || confirm(`처음 한 번만 인식 모델을 내려받아요. ${size}\nWi-Fi에서 하는 걸 권해요. 진행할까요?`)) loadModel();
+    return;
+  }
+  startRecording();
+};
+
+$('para').onclick = () => { pendingBreak = true; say('다음 줄 앞에 한 줄 띄울게요.'); };
+$('undo').onclick = () => { bodyEl.value = removeLastLine(bodyEl.value); save(); say('마지막 줄을 지웠어요.'); };
+$('today').onclick = () => { dateEl.value = todayIso(); load(); };
+dateEl.onchange = load;
+bodyEl.oninput = save;
+modelEl.onchange = () => {
+  store.set('model', modelEl.value);
+  if (worker) { worker.terminate(); worker = null; }
+  modelState = 'none';
+  say('모델을 바꿨어요. 말하기를 누르면 준비해요.');
+};
+
+$('copy').onclick = async () => {
+  const text = $('header').textContent + '\n' + bodyEl.value.trim();
+  try { await navigator.clipboard.writeText(text); }
+  catch {
+    const ta = document.createElement('textarea');
+    ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
+  }
+  say('복사했어요.');
+};
+
+// ---- 시작 ----
+if (store.get('model')) modelEl.value = store.get('model');
+dateEl.value = todayIso();
+load();
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').then(async () => {
+    await navigator.serviceWorker.ready;
+    // 서비스 워커가 붙어야 멀티스레드(빠른 인식)가 켜지므로 첫 방문 때 한 번만 새로고침
+    let reloaded = false;
+    try { reloaded = !!sessionStorage.getItem('coiReloaded'); sessionStorage.setItem('coiReloaded', '1'); } catch { reloaded = true; }
+    if (!self.crossOriginIsolated && !reloaded) { location.reload(); return; }
+    if (store.get('modelReady:' + modelEl.value)) loadModel();   // 이미 받은 모델은 미리 올려둠
+  }).catch(() => {});
+}
+</script>
+</body>
+</html>

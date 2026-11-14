@@ -1,0 +1,15 @@
+{
+  "name": "음성 일기",
+  "short_name": "음성 일기",
+  "description": "말하면 날짜별로 한 줄씩 쌓이는 일기 메모. 음성은 기기 안에서만 처리돼요.",
+  "lang": "ko",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f6f5f2",
+  "theme_color": "#2f6fde",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ]
+}
