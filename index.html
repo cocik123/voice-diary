@@ -44,6 +44,11 @@
   <div id="header"></div>
   <textarea id="body" placeholder="말하기를 누르고 한 가지를 말한 뒤 다시 누르면 여기에 한 줄로 쌓여요. 직접 고쳐 써도 돼요."></textarea>
 
+  <div class="row" id="cursorInfo" style="display:none; margin-top:8px">
+    <span id="cursorText" style="flex:1; font-size:14px"></span>
+    <button id="toEnd">맨 뒤에 추가</button>
+  </div>
+
   <div class="row" style="margin-top:10px">
     <button id="para">문단 나누기</button>
     <button id="undo">마지막 줄 지우기</button>
@@ -61,6 +66,7 @@
       <li>문단은 자동으로 나뉘어요. 2분 안에 이어 말하면 붙이고, 30분 넘게 지나면 띄우고, 그 사이는 앞 문단과 뜻이 비슷한지로 정해요.</li>
       <li>자동 판단이 틀리면 글상자에서 직접 고치면 돼요. 미리 [문단 나누기]를 누르거나 "문단 바꿔"라고만 말하면 다음 줄은 무조건 띄워요.</li>
       <li>말끝에 "시간도 입력해줘"라고 하면 그 줄 끝에 (2026.11.15 14:32)처럼 말한 날짜와 시각을 붙여요. 이 말만 따로 하면 마지막 줄에 붙여요.</li>
+      <li>글상자에서 원하는 곳을 눌러 커서를 두면 다음에 말한 내용 한 번은 그 자리에 들어가요. 줄 끝에 두면 그 아래 새 줄로, 줄 맨 앞에 두면 그 위 새 줄로, 문장 중간에 두면 그 자리에 끼워 넣어요. 커서를 두지 않으면 맨 뒤에 추가돼요.</li>
       <li>"방금 거 지워"라고만 말하면 마지막 줄을 지워요.</li>
       <li>내용은 날짜별로 이 기기에 자동 저장돼요. [전체 복사]는 날짜 줄을 빼고 내용만 복사해요.</li>
     </ul>
@@ -157,6 +163,22 @@ function lastParagraph(body) {          // 마지막 문단의 줄들
   return body.replace(/\s+$/, '').split(/\n\s*\n/).pop().split('\n');
 }
 
+// ---- 커서 위치에 넣기 ----
+// 빈 줄이면 그 줄을 채우고, 줄 끝이면 아래 새 줄, 줄 맨 앞이면 위 새 줄, 문장 중간이면 그 자리에 끼운다.
+function insertAt(body, pos, lineText, inlineText) {
+  pos = Math.max(0, Math.min(pos, body.length));
+  const lineStart = body.lastIndexOf('\n', pos - 1) + 1;
+  const nl = body.indexOf('\n', pos);
+  const lineEnd = nl === -1 ? body.length : nl;
+  const cur = body.slice(lineStart, lineEnd);
+  if (!cur.trim()) return { body: body.slice(0, lineStart) + lineText + body.slice(lineEnd), inline: false };
+  if (pos >= lineStart + cur.trimEnd().length) return { body: body.slice(0, lineEnd) + '\n' + lineText + body.slice(lineEnd), inline: false };
+  if (pos <= lineStart + (cur.length - cur.trimStart().length)) return { body: body.slice(0, lineStart) + lineText + '\n' + body.slice(lineStart), inline: false };
+  const left = body.slice(0, pos), right = body.slice(pos);
+  return { body: left + (/\s$/.test(left) ? '' : ' ') + inlineText + (/^\s/.test(right) ? '' : ' ') + right, inline: true };
+}
+const lineNumberAt = (body, pos) => body.slice(0, pos).split('\n').length;
+
 // ---- 말끝에 "시간도 입력해줘"라고 하면 연월일 시간을 붙임 ----
 const STAMP_RE = /[\s,.]*(?:지금\s*)?시간\s*(?:도|까지|을)?\s*(?:같이\s*)?(?:입력|넣어|적어|붙여|기록)\s*(?:해)?\s*(?:줘|주세요)?[.!]*$/;
 function extractStamp(text) {           // { rest: 명령을 뺀 말, stamp: 명령이 있었는지 }
@@ -183,7 +205,21 @@ const todayIso = () => {
 const key = () => 'diary:' + dateEl.value;
 let pendingBreak = false;
 
-function load() { $('header').textContent = headerFor(dateEl.value); bodyEl.value = store.get(key()); pendingBreak = false; }
+// 커서: 글상자를 눌러 둔 위치. 내용 맨 뒤이거나 둔 적이 없으면 null(맨 뒤에 추가)
+let cursorPos = null;
+function activeCursor() {
+  if (cursorPos == null || !bodyEl.value.slice(cursorPos).trim()) return null;
+  return Math.min(cursorPos, bodyEl.value.length);
+}
+function showCursor() {
+  const pos = activeCursor();
+  $('cursorInfo').style.display = pos == null ? 'none' : 'flex';
+  if (pos != null) $('cursorText').textContent = `📍 다음에 말한 내용은 ${lineNumberAt(bodyEl.value, pos)}번째 줄 커서 자리에 들어가요.`;
+}
+function markCursor() { cursorPos = bodyEl.selectionStart; showCursor(); }
+function clearCursor() { cursorPos = null; showCursor(); }
+
+function load() { $('header').textContent = headerFor(dateEl.value); bodyEl.value = store.get(key()); pendingBreak = false; clearCursor(); }
 function save() { store.set(key(), bodyEl.value); }
 
 // 새 줄 앞에 한 줄을 띄울지 정한다: 직접 지시 > 시간 간격 > 뜻 유사도
@@ -215,6 +251,14 @@ function handleText(text, startedAt = Date.now(), endedAt = Date.now()) {
       bodyEl.value = bodyEl.value.replace(/\s+$/, '') + tag; save(); say('마지막 줄에 시간을 붙였어요.'); return;
     }
     const line = normalizeLine(rest);
+    const pos = activeCursor();
+    if (pos != null) {                  // 커서를 둔 곳이 있으면 이번 한 번은 거기에 넣음
+      const plain = rest.replace(/\s+/g, ' ').replace(/[.。]+$/, '');
+      const r = insertAt(bodyEl.value, pos, line + tag, plain + tag);
+      bodyEl.value = r.body; clearCursor(); save();
+      say(r.inline ? '커서 자리에 끼워 넣었어요.' : '커서가 있던 줄 옆에 새 줄로 넣었어요.');
+      return;
+    }
     const hadText = !!bodyEl.value.trim();
     const brk = await decideBreak(line, startedAt);
     bodyEl.value = appendLine(bodyEl.value, line + tag, brk);
@@ -315,10 +359,13 @@ micEl.onclick = () => {
 };
 
 $('para').onclick = () => { pendingBreak = true; say('다음 줄 앞에 한 줄 띄울게요.'); };
-$('undo').onclick = () => { bodyEl.value = removeLastLine(bodyEl.value); save(); say('마지막 줄을 지웠어요.'); };
+$('undo').onclick = () => { bodyEl.value = removeLastLine(bodyEl.value); save(); clearCursor(); say('마지막 줄을 지웠어요.'); };
 $('today').onclick = () => { dateEl.value = todayIso(); load(); };
 dateEl.onchange = load;
-bodyEl.oninput = save;
+bodyEl.oninput = () => { save(); markCursor(); };
+bodyEl.onclick = markCursor;
+bodyEl.onkeyup = markCursor;
+$('toEnd').onclick = clearCursor;
 modelEl.onchange = () => {
   store.set('model', modelEl.value);
   if (worker) { worker.terminate(); worker = null; }
