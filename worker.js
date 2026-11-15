@@ -1,8 +1,10 @@
 // 워커: 음성 인식(Whisper)과 문장 임베딩 모델을 이 기기 안에서(WASM) 실행한다.
 // 음성과 글은 어디로도 전송되지 않는다.
-import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1';
+// 라이브러리는 외부 서버가 아니라 앱 안(vendor 폴더)에 넣어둔 파일을 쓴다.
+import { pipeline, env } from './vendor/transformers-3.8.1/transformers.min.js';
 
 env.allowLocalModels = false;   // 모델은 Hugging Face에서 한 번 받아 브라우저 캐시에 저장
+env.backends.onnx.wasm.wasmPaths = new URL('./vendor/transformers-3.8.1/', self.location.href).href;
 
 const EMBED_MODEL = 'Xenova/multilingual-e5-small';   // 문장 뜻을 벡터로 바꾸는 모델
 const EMBED_PREFIX = 'query: ';                        // 이 모델이 학습 때 쓴 머리말. 붙여야 구분이 잘 된다

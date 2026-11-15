@@ -63,6 +63,7 @@
       <li>음성은 이 기기 안에서만 글자로 바뀌어요. 인터넷으로 나가지 않아요.</li>
       <li>처음 한 번만 인식 모델을 내려받고, 그 뒤로는 인터넷 없이도 돼요.</li>
       <li>"11시 반부터 오후 1시까지 점심"처럼 시간으로 시작하면 "11:30~13:00 점심"으로 바뀌어요.</li>
+      <li>오전/오후를 말하지 않으면 추정해요. 1~6시는 오후로, 7~11시는 문장 속 말(저녁·퇴근은 오후, 아침·출근은 오전)이나 말한 시각을 보고 정해요. 틀리면 "저녁 8시"처럼 말해주세요.</li>
       <li>문단은 자동으로 나뉘어요. 2분 안에 이어 말하면 붙이고, 30분 넘게 지나면 띄우고, 그 사이는 앞 문단과 뜻이 비슷한지로 정해요.</li>
       <li>자동 판단이 틀리면 글상자에서 직접 고치면 돼요. 미리 [문단 나누기]를 누르거나 "문단 바꿔"라고만 말하면 다음 줄은 무조건 띄워요.</li>
       <li>말끝에 "시간도 입력해줘"라고 하면 그 줄 끝에 (2026.11.15 14:32)처럼 말한 날짜와 시각을 붙여요. 이 말만 따로 하면 마지막 줄에 붙여요.</li>
@@ -97,29 +98,42 @@ const T = '(?:(오전|오후|아침|저녁|밤|새벽|낮)\\s*)?(\\d{1,2})\\s*�
 const RANGE_RE  = new RegExp('^' + T + '\\s*(?:부터|에서|~|-)\\s*' + T + '\\s*(?:까지)?[\\s,]*');
 const SINGLE_RE = new RegExp('^' + T + '\\s*(?:에|쯤|경)?(?:[\\s,]+|$)');
 
-function toMinutes(mer, h, half, m) {
+const PM_HINT = /저녁|밤|퇴근|야근|회식|야식/;      // 문장에 이런 말이 있으면 7~11시는 오후
+const AM_HINT = /아침|출근|기상|일어나|조식/;        // 이런 말이 있으면 오전
+
+// 오전/오후를 말하지 않았을 때의 추정:
+//  1~6시는 오후. 7~11시는 문장 속 힌트 → 없으면 "말한 시각보다 미래가 아닌 쪽"(오후가 이미 지났으면 오후) → 그래도 모르면 오전.
+function toMinutes(mer, h, half, m, ctx = {}) {
   h = Number(h);
   const mm = half ? 30 : (m ? Number(m) : 0);
   if (mer === '오후' || mer === '저녁' || mer === '낮') { if (h < 12) h += 12; }
   else if (mer === '밤') { if (h === 12) h = 0; else if (h >= 5 && h < 12) h += 12; }
   else if (mer === '오전' || mer === '아침' || mer === '새벽') { if (h === 12) h = 0; }
-  else if (h >= 1 && h <= 6) h += 12;   // 표시가 없으면 1~6시는 오후로 봄
+  else if (h >= 1 && h <= 6) h += 12;
+  else if (h >= 7 && h <= 11) {
+    if (ctx.pmHint) h += 12;
+    else if (!ctx.amHint && ctx.nowMin != null && (h + 12) * 60 + mm <= ctx.nowMin) h += 12;
+  }
   return h * 60 + mm;
 }
 const fmt = t => `${Math.floor(t / 60) % 24}:${String(t % 60).padStart(2, '0')}`;
 
-function normalizeLine(text) {
+// nowMin: 말한 시각(자정부터 분). 오늘 날짜에 적을 때만 넘긴다.
+function normalizeLine(text, nowMin = null) {
   let s = text.trim().replace(/\s+/g, ' ').replace(/[.。]+$/, '');
   s = s.replace(NATIVE_RE, (_, pre, w) => `${pre}${NATIVE[w]}시`);   // "열한 시" -> "11시"
+  const pm = PM_HINT.test(s), am = AM_HINT.test(s);
+  const ctx = { nowMin, pmHint: pm && !am, amHint: am && !pm };
   let m = s.match(RANGE_RE);
   if (m) {
-    const a = toMinutes(m[1], m[2], m[3], m[4]);
-    let b = toMinutes(m[5], m[6], m[7], m[8]);
+    let a = toMinutes(m[1], m[2], m[3], m[4], ctx);
+    let b = toMinutes(m[5], m[6], m[7], m[8], ctx);
+    if (!m[1] && a > b && a >= 720 && a - 720 < b) a -= 720;   // 시작을 오후로 추정했는데 끝보다 늦으면 오전으로
     if (b < a && b < 720) b += 720;     // 끝이 시작보다 이르면 오후로 넘김
     return `${fmt(a)}~${fmt(b)} ${s.slice(m[0].length)}`.trim();
   }
   m = s.match(SINGLE_RE);
-  if (m) return `${fmt(toMinutes(m[1], m[2], m[3], m[4]))} ${s.slice(m[0].length)}`.trim();
+  if (m) return `${fmt(toMinutes(m[1], m[2], m[3], m[4], ctx))} ${s.slice(m[0].length)}`.trim();
   return s;
 }
 
@@ -180,7 +194,8 @@ function insertAt(body, pos, lineText, inlineText) {
 const lineNumberAt = (body, pos) => body.slice(0, pos).split('\n').length;
 
 // ---- 말끝에 "시간도 입력해줘"라고 하면 연월일 시간을 붙임 ----
-const STAMP_RE = /[\s,.]*(?:지금\s*)?시간\s*(?:도|까지|을)?\s*(?:같이\s*)?(?:입력|넣어|적어|붙여|기록)\s*(?:해)?\s*(?:줘|주세요)?[.!]*$/;
+// "줘/주세요"로 끝나야 명령으로 본다. ("러닝 시간 기록" 같은 평범한 문장을 명령으로 오인하지 않도록)
+const STAMP_RE = /[\s,.]*(?:지금\s*)?시간\s*(?:도|까지|을)?\s*(?:같이\s*)?(?:입력|넣어|적어|붙여|기록)\s*(?:해)?\s*(?:줘|주세요)[.!]*$/;
 function extractStamp(text) {           // { rest: 명령을 뺀 말, stamp: 명령이 있었는지 }
   const t = text.trim();
   return STAMP_RE.test(t) ? { rest: t.replace(STAMP_RE, '').trim(), stamp: true } : { rest: t, stamp: false };
@@ -198,10 +213,17 @@ const store = {
   set(k, v) { try { localStorage.setItem(k, v); } catch {} },
 };
 const say = msg => { statusEl.textContent = msg; };
-const todayIso = () => {
-  const n = new Date();
+const isoOf = ms => {
+  const n = new Date(ms);
   return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
 };
+const todayIso = () => isoOf(Date.now());
+
+// 오늘 날짜를 보고 있었다면 자정이 지났을 때 새 날짜로 따라간다. (과거 날짜를 일부러 골라 보고 있으면 그대로 둠)
+let viewingToday = true;
+function syncDate() {
+  if (viewingToday && dateEl.value !== todayIso()) { dateEl.value = todayIso(); load(); }
+}
 const key = () => 'diary:' + dateEl.value;
 let pendingBreak = false;
 
@@ -250,7 +272,9 @@ function handleText(text, startedAt = Date.now(), endedAt = Date.now()) {
       if (!bodyEl.value.trim()) { say('시간을 붙일 줄이 아직 없어요.'); return; }
       bodyEl.value = bodyEl.value.replace(/\s+$/, '') + tag; save(); say('마지막 줄에 시간을 붙였어요.'); return;
     }
-    const line = normalizeLine(rest);
+    const spoken = new Date(startedAt);
+    const nowMin = dateEl.value === isoOf(startedAt) ? spoken.getHours() * 60 + spoken.getMinutes() : null;
+    const line = normalizeLine(rest, nowMin);
     const pos = activeCursor();
     if (pos != null) {                  // 커서를 둔 곳이 있으면 이번 한 번은 거기에 넣음
       const plain = rest.replace(/\s+/g, ' ').replace(/[.。]+$/, '');
@@ -279,7 +303,7 @@ function ensureWorker() {
   if (worker) return;
   worker = new Worker('worker.js', { type: 'module' });
   worker.onmessage = ({ data }) => {
-    if (data.type === 'progress') { progEl.style.display = 'block'; progEl.value = data.percent; say(`${data.stage} 내려받는 중 ${data.percent}%`); }
+    if (data.type === 'progress') { progEl.style.display = 'block'; progEl.value = data.percent; say(`${data.stage} 준비 중 ${data.percent}%`); }
     else if (data.type === 'ready') {
       modelState = 'ready'; embedOk = data.embed; progEl.style.display = 'none';
       store.set('ready2:' + modelEl.value, '1');
@@ -291,7 +315,25 @@ function ensureWorker() {
       if (w) data.type === 'result' ? w.resolve(data.value) : w.reject(new Error(data.message));
     }
   };
-  worker.onerror = e => { modelState = 'none'; say('인식 엔진 오류: ' + (e.message || '알 수 없음')); };
+  worker.onerror = e => {
+    modelState = 'none';
+    for (const w of waiters.values()) w.reject(new Error('인식 엔진이 멈췄어요'));   // 기다리던 작업이 영영 멈춰 있지 않게
+    waiters.clear();
+    say('인식 엔진 오류: ' + (e.message || '알 수 없음'));
+  };
+}
+
+// 녹음 중이거나 글자로 바꾸는 동안에는 화면이 꺼지지 않게 한다. (화면이 꺼지면 변환이 멈출 수 있음)
+let wake = null, wakeRequesting = false;
+async function updateWake() {
+  const busy = !!recorder || pending > 0;
+  try {
+    if (busy && !wake && !wakeRequesting && 'wakeLock' in navigator && document.visibilityState === 'visible') {
+      wakeRequesting = true;
+      wake = await navigator.wakeLock.request('screen');
+      wake.addEventListener('release', () => { wake = null; });
+    } else if (!busy && wake) { const w = wake; wake = null; await w.release(); }
+  } catch {} finally { wakeRequesting = false; }
 }
 
 function loadModel() {
@@ -313,14 +355,16 @@ async function transcribeBlob(blob, startedAt = Date.now(), endedAt = Date.now()
   const ctx = new AudioContext({ sampleRate: 16000 });       // Whisper 입력은 16kHz 모노
   let samples;
   try { samples = (await ctx.decodeAudioData(await blob.arrayBuffer())).getChannelData(0).slice(); }
+  catch { say('녹음을 읽지 못했어요. 다시 말해주세요.'); return; }
   finally { ctx.close(); }
   if (samples.length < 16000 * 0.4 || rms(samples) < 0.003) { say('소리가 너무 짧거나 작아요.'); return; }
-  pending++; say(`글자로 바꾸는 중… (${pending}개)`);
+  pending++; say(`글자로 바꾸는 중… (${pending}개)`); updateWake();
   try {
     const text = await ask({ type: 'run', audio: samples }, [samples.buffer]);
     pending--; say(pending ? `글자로 바꾸는 중… (${pending}개)` : '');
     await handleText(text, startedAt, endedAt);
   } catch (e) { pending--; say('인식 실패: ' + e.message); }
+  finally { updateWake(); }
 }
 window.transcribeBlob = transcribeBlob;
 
@@ -339,10 +383,12 @@ async function startRecording() {
     micEl.classList.remove('on'); micEl.textContent = '🎤 말하기';
     const blob = new Blob(chunks, { type: recorder.mimeType });
     recorder = null;
+    updateWake();
     transcribeBlob(blob, startedAt, Date.now());
   };
   recorder.start();
   startedAt = Date.now();
+  updateWake();
   micEl.classList.add('on'); micEl.textContent = '■ 다 말했어요';
   say('듣는 중…');
 }
@@ -355,13 +401,17 @@ micEl.onclick = () => {
     if (store.get('ready2:' + modelEl.value) || confirm(`처음 한 번만 모델을 내려받아요.\n음성 인식: ${size}\n문단 판단: 약 120MB\n이미 받은 것은 다시 받지 않아요. Wi-Fi에서 하는 걸 권해요. 진행할까요?`)) loadModel();
     return;
   }
+  syncDate();                           // 자정이 지났으면 오늘 날짜로 옮긴 뒤 녹음
   startRecording();
 };
 
 $('para').onclick = () => { pendingBreak = true; say('다음 줄 앞에 한 줄 띄울게요.'); };
 $('undo').onclick = () => { bodyEl.value = removeLastLine(bodyEl.value); save(); clearCursor(); say('마지막 줄을 지웠어요.'); };
-$('today').onclick = () => { dateEl.value = todayIso(); load(); };
-dateEl.onchange = load;
+$('today').onclick = () => { viewingToday = true; dateEl.value = todayIso(); load(); };
+dateEl.onchange = () => { viewingToday = dateEl.value === todayIso(); load(); };
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { syncDate(); updateWake(); } });
+window.addEventListener('focus', syncDate);
+setInterval(syncDate, 60 * 1000);
 bodyEl.oninput = () => { save(); markCursor(); };
 bodyEl.onclick = markCursor;
 bodyEl.onkeyup = markCursor;
@@ -387,6 +437,9 @@ $('copy').onclick = async () => {
 if (store.get('model')) modelEl.value = store.get('model');
 dateEl.value = todayIso();
 load();
+
+// 저장 공간이 부족해도 브라우저가 일기와 내려받은 모델을 지우지 않도록 보호를 요청
+try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {}); } catch {}
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js').then(async () => {
